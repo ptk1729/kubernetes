@@ -1,0 +1,88 @@
+name: Complete process with SLSA provenance
+on:
+  workflow_dispatch:
+  push:
+    tags: ["*"]
+
+jobs:
+  # 1) gather git info
+  args:
+    runs-on: ubuntu-latest
+    outputs:
+      commit-date: ${{ steps.ldflags.outputs.commit-date }}
+      commit:       ${{ steps.ldflags.outputs.commit }}
+      version:      ${{ steps.ldflags.outputs.version }}
+      tree-state:   ${{ steps.ldflags.outputs.tree-state }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - id: ldflags
+        run: |
+          echo "commit-date=$(git log --date=iso8601-strict -1 --pretty=%ct)" >>"$GITHUB_OUTPUT"
+          echo "commit=$GITHUB_SHA"                                  >>"$GITHUB_OUTPUT"
+          echo "version=$(git describe --tags --always --dirty | cut -c2-)" >>"$GITHUB_OUTPUT"
+          echo "tree-state=$(if git diff --quiet; then echo clean; else echo dirty; fi)" >>"$GITHUB_OUTPUT"
+
+  # 2) build and sign
+  build:
+    needs: args
+    permissions:
+      id-token: write   # sign provenance
+      contents: write   # upload release asset
+      actions: read     # read workflow path
+    uses: slsa-framework/slsa-github-generator/.github/workflows/builder_go_slsa3.yml@v2.1.0
+    with:
+      go-version: 1.25.0
+      upload-assets: true
+      prerelease:  true
+      evaluated-envs: "COMMIT_DATE:${{needs.args.outputs.commit-date}}, COMMIT:${{needs.args.outputs.commit}}, VERSION:${{needs.args.outputs.version}}, TREE_STATE:${{needs.args.outputs.tree-state}}"
+
+      
+
+  # 3) download + verify
+  verify:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      # a) pull the official SLSA verifier
+      - uses: actions/checkout@v4
+        with:
+          repository: slsa-framework/slsa-verifier
+          path: slsa-verifier
+
+      # b) pull the built files
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.go-binary-name }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.go-provenance-name }}
+
+      # c) set up Go
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.25.0' }
+
+      # d) build the verifier
+      - name: Build SLSA verifier
+        run: |
+          cd slsa-verifier
+          go build -o slsa-verifier ./cli/slsa-verifier
+
+      # e) run the verification
+      - name: Verify binary
+        run: |
+          ./slsa-verifier/slsa-verifier verify-artifact \
+            --provenance-path ${{ needs.build.outputs.go-provenance-name }} \
+            --source-uri github.com/${{ github.repository }} \
+            --source-tag ${{ github.ref_name }} \
+            ${{ needs.build.outputs.go-binary-name }}
+
+      - name: Upload verification results
+        uses: actions/upload-artifact@v4
+        with:
+          name: slsa-verification-results
+          path: |
+            ${{ needs.build.outputs.go-binary-name }}
+            ${{ needs.build.outputs.go-provenance-name }}
+          if-no-files-found: error

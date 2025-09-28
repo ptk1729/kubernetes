@@ -1,0 +1,156 @@
+name: SLSA Multi-Binary Build
+on:
+  workflow_dispatch:
+  push:
+    tags: ["*"]
+
+jobs:
+  # 1) gather git info
+  args:
+    runs-on: ubuntu-latest
+    outputs:
+      commit-date: ${{ steps.ldflags.outputs.commit-date }}
+      commit:       ${{ steps.ldflags.outputs.commit }}
+      version:      ${{ steps.ldflags.outputs.version }}
+      tree-state:   ${{ steps.ldflags.outputs.tree-state }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - id: ldflags
+        run: |
+          echo "commit-date=$(git log --date=iso8601-strict -1 --pretty=%ct)" >>"$GITHUB_OUTPUT"
+          echo "commit=$GITHUB_SHA"                                  >>"$GITHUB_OUTPUT"
+          echo "version=$(git describe --tags --always --dirty | cut -c2-)" >>"$GITHUB_OUTPUT"
+          echo "tree-state=$(if git diff --quiet; then echo clean; else echo dirty; fi)" >>"$GITHUB_OUTPUT"
+
+  # 2) build kubectl
+  build-kubectl:
+    needs: args
+    permissions:
+      id-token: write   # sign provenance
+      contents: write   # upload release asset
+      actions: read     # read workflow path
+    uses: slsa-framework/slsa-github-generator/.github/workflows/builder_go_slsa3.yml@v2.1.0
+    with:
+      go-version: 1.25.0
+      upload-assets: true
+      prerelease: true
+      evaluated-envs: "COMMIT_DATE:${{needs.args.outputs.commit-date}}, COMMIT:${{needs.args.outputs.commit}}, VERSION:${{needs.args.outputs.version}}, TREE_STATE:${{needs.args.outputs.tree-state}}"
+      config-file: .slsa-goreleaser-kubectl.yml
+
+  # 3) build kubelet
+  build-kubelet:
+    needs: args
+    permissions:
+      id-token: write   # sign provenance
+      contents: write   # upload release asset
+      actions: read     # read workflow path
+    uses: slsa-framework/slsa-github-generator/.github/workflows/builder_go_slsa3.yml@v2.1.0
+    with:
+      go-version: 1.25.0
+      upload-assets: true
+      prerelease: true
+      evaluated-envs: "COMMIT_DATE:${{needs.args.outputs.commit-date}}, COMMIT:${{needs.args.outputs.commit}}, VERSION:${{needs.args.outputs.version}}, TREE_STATE:${{needs.args.outputs.tree-state}}"
+      config-file: .slsa-goreleaser-kubelet.yml
+
+  # 4) build kube-apiserver
+  build-kube-apiserver:
+    needs: args
+    permissions:
+      id-token: write   # sign provenance
+      contents: write   # upload release asset
+      actions: read     # read workflow path
+    uses: slsa-framework/slsa-github-generator/.github/workflows/builder_go_slsa3.yml@v2.1.0
+    with:
+      go-version: 1.25.0
+      upload-assets: true
+      prerelease: true
+      evaluated-envs: "COMMIT_DATE:${{needs.args.outputs.commit-date}}, COMMIT:${{needs.args.outputs.commit}}, VERSION:${{needs.args.outputs.version}}, TREE_STATE:${{needs.args.outputs.tree-state}}"
+      config-file: .slsa-goreleaser-kube-apiserver.yml
+
+  # 5) verify all binaries
+  verify:
+    needs: [build-kubectl, build-kubelet, build-kube-apiserver]
+    runs-on: ubuntu-latest
+    steps:
+      # a) pull the verifier code
+      - uses: actions/checkout@v4
+        with:
+          repository: slsa-framework/slsa-verifier
+          path: slsa-verifier
+
+      # b) set up Go
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.25.0' }
+
+      # c) build the verifier
+      - name: Build SLSA verifier
+        run: |
+          cd slsa-verifier
+          go build -o slsa-verifier ./cli/slsa-verifier
+
+      # d) download and verify kubectl
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build-kubectl.outputs.go-binary-name }}
+          path: ./artifacts/kubectl
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build-kubectl.outputs.go-provenance-name }}
+          path: ./artifacts/kubectl
+
+      # e) download and verify kubelet
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build-kubelet.outputs.go-binary-name }}
+          path: ./artifacts/kubelet
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build-kubelet.outputs.go-provenance-name }}
+          path: ./artifacts/kubelet
+
+      # f) download and verify kube-apiserver
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build-kube-apiserver.outputs.go-binary-name }}
+          path: ./artifacts/kube-apiserver
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build-kube-apiserver.outputs.go-provenance-name }}
+          path: ./artifacts/kube-apiserver
+
+      # g) verify all binaries
+      - name: Verify kubectl
+        run: |
+          ./slsa-verifier/slsa-verifier verify-artifact \
+            --provenance-path ./artifacts/kubectl/${{ needs.build-kubectl.outputs.go-provenance-name }} \
+            --source-uri github.com/${{ github.repository }} \
+            --source-tag ${{ github.ref_name }} \
+            ./artifacts/kubectl/${{ needs.build-kubectl.outputs.go-binary-name }}
+
+      - name: Verify kubelet
+        run: |
+          ./slsa-verifier/slsa-verifier verify-artifact \
+            --provenance-path ./artifacts/kubelet/${{ needs.build-kubelet.outputs.go-provenance-name }} \
+            --source-uri github.com/${{ github.repository }} \
+            --source-tag ${{ github.ref_name }} \
+            ./artifacts/kubelet/${{ needs.build-kubelet.outputs.go-binary-name }}
+
+      - name: Verify kube-apiserver
+        run: |
+          ./slsa-verifier/slsa-verifier verify-artifact \
+            --provenance-path ./artifacts/kube-apiserver/${{ needs.build-kube-apiserver.outputs.go-provenance-name }} \
+            --source-uri github.com/${{ github.repository }} \
+            --source-tag ${{ github.ref_name }} \
+            ./artifacts/kube-apiserver/${{ needs.build-kube-apiserver.outputs.go-binary-name }}
+
+      - name: Upload verification results
+        uses: actions/upload-artifact@v4
+        with:
+          name: slsa-verification-results
+          path: |
+            ./artifacts/
+          if-no-files-found: error

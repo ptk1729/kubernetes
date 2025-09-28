@@ -1,0 +1,104 @@
+# SLSA Policy Configuration for Kubernetes
+# This file defines the security policies for SLSA provenance verification
+
+version: 1
+
+# Source repository validation
+source:
+  # Allowed source repositories
+  repositories:
+    - "github.com/kubernetes/kubernetes"
+    - "github.com/${{ github.repository }}"
+  
+  # Required source tags/refs
+  tags:
+    - pattern: "v*.*.*"  # Semantic versioning
+    - pattern: "v*.*.*-*"  # Pre-release versions
+  
+  # Required source commit validation
+  commit:
+    min_length: 40  # SHA-1 hash length
+    max_age_days: 90  # Maximum age of commits
+
+# Build environment validation
+build:
+  # Required build environment
+  environment:
+    os: ["linux"]
+    arch: ["amd64", "arm64"]
+  
+  # Required build tools
+  tools:
+    go:
+      min_version: "1.25"
+      max_version: "1.25"
+  
+  # Required build flags
+  flags:
+    required:
+      - "-trimpath"
+      - "-tags=netgo"
+  
+  # Required environment variables
+  env_vars:
+    required:
+      - "GO111MODULE=on"
+      - "CGO_ENABLED=0"
+
+# Binary validation
+binary:
+  # Allowed binary names
+  names:
+    - "kubectl-*"
+    - "kubelet-*"
+    - "kube-apiserver-*"
+    - "kube-controller-manager-*"
+    - "kube-scheduler-*"
+    - "kube-proxy-*"
+  
+  # Required binary properties
+  properties:
+    stripped: true
+    static: true
+    reproducible: true
+
+# Provenance validation
+provenance:
+  # Required provenance fields
+  required_fields:
+    - "buildType"
+    - "builder.id"
+    - "buildConfig"
+    - "metadata.buildInvocationId"
+    - "metadata.completeness"
+    - "materials"
+  
+  # Required builder information
+  builder:
+    id: "https://github.com/slsa-framework/slsa-github-generator/.github/workflows/builder_go_slsa3.yml@v2.1.0"
+    version: "v2.1.0"
+  
+  # Required materials (source code)
+  materials:
+    min_count: 1
+    required_types:
+      - "git"
+
+# Security requirements
+security:
+  # Required security levels
+  slsa_level: 3
+  
+  # Required attestations
+  attestations:
+    - "provenance"
+  
+  # Required signatures
+  signatures:
+    required: true
+    algorithm: "ECDSA-P256"
+  
+  # Required transparency log
+  transparency_log:
+    required: true
+    public: true
